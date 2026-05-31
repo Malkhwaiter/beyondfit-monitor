@@ -193,6 +193,24 @@ def send_telegram(token: str, chat_id: str, text: str, *, retries: int = 3) -> N
     raise RuntimeError(f"Telegram send failed after {retries} attempts: {last_err}")
 
 
+def build_summary(current: dict[str, dict], watch_sizes: list[str],
+                  fetch_failures: int) -> str:
+    """A daily heartbeat: current status of every watched size per product."""
+    lines = ["📋 <b>ملخص يومي — beyondfit-monitor</b>", ""]
+    lines.append(f"حالة المقاسات {', '.join(watch_sizes)} الحين:")
+    for info in current.values():
+        states = []
+        for size in watch_sizes:
+            ok = info["sizes"].get(size)
+            mark = "✅ متوفر" if ok else "❌ نافد"
+            states.append(f"{size}: {mark}")
+        lines.append(f"• <b>{info['title']}</b> — {' | '.join(states)}")
+    if fetch_failures:
+        lines.append(f"\n⚠️ تعذّر قراءة {fetch_failures} منتج هذي المرة.")
+    lines.append("\nالبوت شغّال ✅ وراح ينبهك أول ما ينزل مقاسك.")
+    return "\n".join(lines)
+
+
 def load_config() -> tuple[list[str], list[str]]:
     with CONFIG_FILE.open("r", encoding="utf-8") as f:
         cfg = json.load(f)
@@ -208,11 +226,14 @@ def main() -> int:
         print("ERROR: TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID must be set.", file=sys.stderr)
         return 2
 
+    want_summary = os.environ.get("SEND_SUMMARY", "").strip().lower() in {"1", "true", "yes"}
+
     products, watch_sizes = load_config()
     if not products:
         print("ERROR: no products configured in products.json.", file=sys.stderr)
         return 2
-    print(f"Watching sizes {watch_sizes} across {len(products)} products.")
+    print(f"Watching sizes {watch_sizes} across {len(products)} products."
+          f"{' [summary mode]' if want_summary else ''}")
 
     # Collect current availability for every product.
     current: dict[str, dict] = {}
@@ -243,6 +264,12 @@ def main() -> int:
     if first_run:
         save_state(current)
         print("First run: baseline saved, no notifications sent.")
+        if want_summary:
+            try:
+                send_telegram(token, chat_id, build_summary(current, watch_sizes, fetch_failures))
+                print("Daily summary sent.")
+            except Exception as e:  # noqa: BLE001
+                print(f"  failed to send summary: {e}", file=sys.stderr)
         return 0
 
     # Detect sold-out -> in-stock transitions for watched sizes.
@@ -278,6 +305,13 @@ def main() -> int:
     merged = dict(previous)
     merged.update(current)
     save_state(merged)
+
+    if want_summary:
+        try:
+            send_telegram(token, chat_id, build_summary(current, watch_sizes, fetch_failures))
+            print("Daily summary sent.")
+        except Exception as e:  # noqa: BLE001
+            print(f"  failed to send summary: {e}", file=sys.stderr)
 
     if failed:
         print("Some notifications failed — surfacing as failure.", file=sys.stderr)

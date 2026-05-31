@@ -4,8 +4,14 @@ on:
   # Staggered off the :00 mark to avoid GitHub's top-of-hour scheduling storm.
   # On free repos GitHub throttles cron, so real cadence is ~30–60 min.
   schedule:
-    - cron: "11 * * * *"
+    - cron: "11 * * * *"      # hourly availability check
+    - cron: "0 6 * * *"       # daily heartbeat summary — 06:00 UTC = 09:00 KSA
   workflow_dispatch:
+    inputs:
+      summary:
+        description: "Send a daily summary message this run"
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -37,6 +43,9 @@ jobs:
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          # Send the heartbeat summary on the daily cron, or when manually
+          # dispatched with the summary input checked.
+          SEND_SUMMARY: ${{ (github.event.schedule == '0 6 * * *' || github.event.inputs.summary == 'true') && '1' || '0' }}
         run: |
           mkdir -p state
           python monitor.py
