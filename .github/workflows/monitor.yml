@@ -4,8 +4,9 @@ on:
   # Staggered off the :00 mark to avoid GitHub's top-of-hour scheduling storm.
   # On free repos GitHub throttles cron, so real cadence is ~30–60 min.
   schedule:
-    - cron: "11 * * * *"      # hourly availability check
-    - cron: "0 6 * * *"       # daily heartbeat summary — 06:00 UTC = 09:00 KSA
+    # Hourly check. monitor.py also emits a heartbeat summary every ~3h, gated
+    # by elapsed time in state, so a skipped slot is covered by the next run.
+    - cron: "11 * * * *"
   workflow_dispatch:
     inputs:
       summary:

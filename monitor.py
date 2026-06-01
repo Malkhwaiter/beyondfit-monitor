@@ -35,12 +35,12 @@ STATE_FILE = Path("state/known_stock.json")
 SUMMARY_STATE_FILE = Path("state/summary_state.json")
 TELEGRAM_API = "https://api.telegram.org/bot{token}/sendMessage"
 
-# Daily heartbeat is due once KSA local time passes this hour. GitHub's free
-# cron is unreliable (runs are often delayed or skipped entirely), so instead
-# of firing at one exact slot we send on the FIRST successful run after this
-# hour each day and remember we sent it — robust against skipped slots.
-KSA_OFFSET_HOURS = 3            # Saudi Arabia is UTC+3, no DST
-SUMMARY_HOUR_KSA = 9           # ~09:00 Riyadh
+# Heartbeat summary cadence. GitHub's free cron is unreliable (runs are often
+# delayed or skipped entirely), so instead of firing at exact slots we send the
+# summary on the first successful run once this many hours have passed since the
+# last summary, and remember when we sent it — robust against skipped slots.
+KSA_OFFSET_HOURS = 3              # Saudi Arabia is UTC+3, no DST
+SUMMARY_EVERY_HOURS = 3          # send a heartbeat roughly every 3 hours
 
 # Salla calls the size option group "القياس"; allow a few aliases just in case.
 SIZE_GROUP_NAMES = {"القياس", "المقاس", "مقاس", "size", "Size", "الحجم"}
@@ -206,28 +206,35 @@ def ksa_now() -> datetime:
     return datetime.now(timezone.utc) + timedelta(hours=KSA_OFFSET_HOURS)
 
 
-def load_summary_date() -> str:
+def load_last_summary() -> datetime | None:
     if not SUMMARY_STATE_FILE.exists():
-        return ""
+        return None
     try:
         with SUMMARY_STATE_FILE.open("r", encoding="utf-8") as f:
-            return str(json.load(f).get("last_sent_ksa_date", ""))
-    except (json.JSONDecodeError, OSError):
-        return ""
+            raw = json.load(f).get("last_sent_utc", "")
+        return datetime.fromisoformat(raw) if raw else None
+    except (json.JSONDecodeError, OSError, ValueError):
+        return None
 
 
-def save_summary_date(date_str: str) -> None:
+def save_last_summary(dt_utc: datetime) -> None:
     SUMMARY_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
     tmp = SUMMARY_STATE_FILE.with_suffix(".json.tmp")
     with tmp.open("w", encoding="utf-8") as f:
-        json.dump({"last_sent_ksa_date": date_str}, f)
+        json.dump({"last_sent_utc": dt_utc.isoformat()}, f)
     tmp.replace(SUMMARY_STATE_FILE)
+
+
+def summary_due(now_utc: datetime, last: datetime | None) -> bool:
+    if last is None:
+        return True  # never sent -> send now
+    return (now_utc - last) >= timedelta(hours=SUMMARY_EVERY_HOURS)
 
 
 def build_summary(current: dict[str, dict], watch_sizes: list[str],
                   fetch_failures: int) -> str:
     """A daily heartbeat: current status of every watched size per product."""
-    lines = ["📋 <b>ملخص يومي — beyondfit-monitor</b>", ""]
+    lines = ["📋 <b>ملخص — beyondfit-monitor</b>", ""]
     lines.append(f"حالة المقاسات {', '.join(watch_sizes)} الحين:")
     for info in current.values():
         states = []
@@ -262,10 +269,9 @@ def main() -> int:
         os.environ.get("FORCE_SUMMARY", "").strip().lower() in truthy
         or os.environ.get("SEND_SUMMARY", "").strip().lower() in truthy
     )
-    now_ksa = ksa_now()
-    today_ksa = now_ksa.strftime("%Y-%m-%d")
-    due_today = now_ksa.hour >= SUMMARY_HOUR_KSA and load_summary_date() != today_ksa
-    want_summary = force_summary or due_today
+    now_utc = datetime.now(timezone.utc)
+    now_ksa = now_utc + timedelta(hours=KSA_OFFSET_HOURS)
+    want_summary = force_summary or summary_due(now_utc, load_last_summary())
 
     products, watch_sizes = load_config()
     if not products:
@@ -307,8 +313,8 @@ def main() -> int:
         if want_summary:
             try:
                 send_telegram(token, chat_id, build_summary(current, watch_sizes, fetch_failures))
-                save_summary_date(today_ksa)
-                print("Daily summary sent.")
+                save_last_summary(now_utc)
+                print("Heartbeat summary sent.")
             except Exception as e:  # noqa: BLE001
                 print(f"  failed to send summary: {e}", file=sys.stderr)
         return 0
@@ -350,8 +356,8 @@ def main() -> int:
     if want_summary:
         try:
             send_telegram(token, chat_id, build_summary(current, watch_sizes, fetch_failures))
-            save_summary_date(today_ksa)
-            print("Daily summary sent.")
+            save_last_summary(now_utc)
+            print("Heartbeat summary sent.")
         except Exception as e:  # noqa: BLE001
             print(f"  failed to send summary: {e}", file=sys.stderr)
 
