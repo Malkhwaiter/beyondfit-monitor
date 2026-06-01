@@ -232,9 +232,13 @@ def summary_due(now_utc: datetime, last: datetime | None) -> bool:
 
 
 def build_summary(current: dict[str, dict], watch_sizes: list[str],
-                  fetch_failures: int) -> str:
-    """A daily heartbeat: current status of every watched size per product."""
-    lines = ["📋 <b>ملخص — beyondfit-monitor</b>", ""]
+                  fetch_failures: int, now_ksa: datetime,
+                  newly_available: list[str]) -> str:
+    """Periodic summary: check time (KSA), current status of every watched size
+    per product, and anything that newly became available during this run."""
+    lines = ["📋 <b>ملخص — beyondfit-monitor</b>"]
+    lines.append(f"🕒 وقت الفحص: {now_ksa.strftime('%Y-%m-%d %H:%M')} (توقيت السعودية)")
+    lines.append("")
     lines.append(f"حالة المقاسات {', '.join(watch_sizes)} الحين:")
     for info in current.values():
         states = []
@@ -243,6 +247,13 @@ def build_summary(current: dict[str, dict], watch_sizes: list[str],
             mark = "✅ متوفر" if ok else "❌ نافد"
             states.append(f"{size}: {mark}")
         lines.append(f"• <b>{info['title']}</b> — {' | '.join(states)}")
+    lines.append("")
+    if newly_available:
+        lines.append("🆕 توفّر جديد هذا التشغيل:")
+        for item in newly_available:
+            lines.append(f"• {item}")
+    else:
+        lines.append("🆕 ما فيه توفّر جديد هذي المرة.")
     if fetch_failures:
         lines.append(f"\n⚠️ تعذّر قراءة {fetch_failures} منتج هذي المرة.")
     lines.append("\nالبوت شغّال ✅ وراح ينبهك أول ما ينزل مقاسك.")
@@ -265,21 +276,21 @@ def _int_env(name: str, default: int) -> int:
 
 
 def perform_check(token: str, chat_id: str, products: list[str],
-                  watch_sizes: list[str], force_summary: bool) -> int:
-    """Run ONE full check: read every product, notify watched-size
-    sold-out -> in-stock transitions, persist the updated state, and emit the
-    heartbeat summary if due. Returns 0 on success, 1 if anything failed.
+                  watch_sizes: list[str]) -> int:
+    """Run ONE full check: read every product and send an instant alert for any
+    watched-size sold-out -> in-stock transition, then persist the updated
+    state. Returns 0 on success, 1 if anything failed.
+
+    The periodic summary is NOT sent here — main() sends it once per run, so a
+    multi-check run produces a single summary, not one per check.
 
     State is saved at the end of every call, so when this is invoked several
     times within a single run, a size that already triggered an alert won't
     alert again on the next check inside the same run.
     """
-    now_utc = datetime.now(timezone.utc)
-    now_ksa = now_utc + timedelta(hours=KSA_OFFSET_HOURS)
-    want_summary = force_summary or summary_due(now_utc, load_last_summary())
+    now_ksa = ksa_now()
     print(f"Watching sizes {watch_sizes} across {len(products)} products. "
-          f"KSA now {now_ksa.strftime('%Y-%m-%d %H:%M')}; "
-          f"summary {'DUE' if want_summary else 'not due'}.")
+          f"KSA now {now_ksa.strftime('%Y-%m-%d %H:%M')}.")
 
     # Collect current availability for every product.
     current: dict[str, dict] = {}
@@ -310,13 +321,6 @@ def perform_check(token: str, chat_id: str, products: list[str],
     if first_run:
         save_state(current)
         print("First run: baseline saved, no notifications sent.")
-        if want_summary:
-            try:
-                send_telegram(token, chat_id, build_summary(current, watch_sizes, fetch_failures))
-                save_last_summary(now_utc)
-                print("Heartbeat summary sent.")
-            except Exception as e:  # noqa: BLE001
-                print(f"  failed to send summary: {e}", file=sys.stderr)
         return 0
 
     # Detect sold-out -> in-stock transitions for watched sizes.
@@ -353,14 +357,6 @@ def perform_check(token: str, chat_id: str, products: list[str],
     merged.update(current)
     save_state(merged)
 
-    if want_summary:
-        try:
-            send_telegram(token, chat_id, build_summary(current, watch_sizes, fetch_failures))
-            save_last_summary(now_utc)
-            print("Heartbeat summary sent.")
-        except Exception as e:  # noqa: BLE001
-            print(f"  failed to send summary: {e}", file=sys.stderr)
-
     if failed:
         print("Some notifications failed — surfacing as failure.", file=sys.stderr)
         return 1
@@ -379,14 +375,28 @@ def main() -> int:
 
     truthy = {"1", "true", "yes"}
     force_summary = (
-        os.environ.get("FORCE_SUMMARY", "").strip().lower() in truthy
-        or os.environ.get("SEND_SUMMARY", "").strip().lower() in truthy
+        os.environ.get("SEND_SUMMARY", "").strip().lower() in truthy
+        or os.environ.get("FORCE_SUMMARY", "").strip().lower() in truthy
     )
+    now_utc = datetime.now(timezone.utc)
+    # The summary is driven primarily by an external trigger that sets
+    # SEND_SUMMARY=1 at a precise cadence (e.g. cron-job.org every 3h). The
+    # time-based gate is a fallback so one still goes out roughly every few
+    # hours from the scheduled runs if the external trigger is down.
+    want_summary = force_summary or summary_due(now_utc, load_last_summary())
 
     products, watch_sizes = load_config()
     if not products:
         print("ERROR: no products configured in products.json.", file=sys.stderr)
         return 2
+
+    # Which (product, watched-size) pairs were already in stock BEFORE this run,
+    # so the summary can report what newly became available during the run.
+    def avail_pairs(state: dict) -> set:
+        return {(k, s) for k, v in state.items()
+                for s in watch_sizes if v.get("sizes", {}).get(s)}
+    before = avail_pairs(load_state())
+    first_ever = not load_state()
 
     # One run performs several checks spaced apart, so a single hourly GitHub
     # schedule covers the whole hour (e.g. 4 checks 15 min apart) instead of
@@ -394,8 +404,8 @@ def main() -> int:
     checks = max(1, _int_env("CHECKS_PER_RUN", 4))
     interval = max(0, _int_env("CHECK_INTERVAL_SECONDS", 900))
     total_min = (checks - 1) * interval // 60
-    print(f"Run plan: {checks} check(s), {interval}s apart (~{total_min} min total).",
-          flush=True)
+    print(f"Run plan: {checks} check(s), {interval}s apart (~{total_min} min total). "
+          f"summary={'ON' if want_summary else 'off'}", flush=True)
 
     worst = 0
     for i in range(checks):
@@ -403,8 +413,27 @@ def main() -> int:
             print(f"--- sleeping {interval}s before check {i + 1}/{checks} ---", flush=True)
             time.sleep(interval)
         print(f"\n===== CHECK {i + 1}/{checks} =====", flush=True)
-        rc = perform_check(token, chat_id, products, watch_sizes, force_summary)
+        rc = perform_check(token, chat_id, products, watch_sizes)
         worst = max(worst, rc)
+
+    # Send exactly ONE summary per run, after all checks, whenever it's wanted.
+    if want_summary:
+        final = load_state()
+        # Newly available = in stock now but not at the start of the run. Skip
+        # on the first-ever run so the saved baseline isn't reported as "new".
+        newly = [] if first_ever else [
+            f"{final[k]['title']} — {s}"
+            for (k, s) in sorted(avail_pairs(final) - before) if k in final
+        ]
+        missing = sum(1 for u in products if product_key(u) not in final)
+        try:
+            send_telegram(token, chat_id,
+                          build_summary(final, watch_sizes, missing, ksa_now(), newly))
+            save_last_summary(now_utc)
+            print("Summary sent.", flush=True)
+        except Exception as e:  # noqa: BLE001
+            print(f"  failed to send summary: {e}", file=sys.stderr)
+            worst = max(worst, 1)
 
     return worst
 

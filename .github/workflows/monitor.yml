@@ -4,15 +4,20 @@ on:
   # Staggered off the :00 mark to avoid GitHub's top-of-hour scheduling storm.
   # On free repos GitHub throttles cron, so real cadence is ~30–60 min.
   schedule:
-    # Hourly check. monitor.py also emits a heartbeat summary every ~3h, gated
-    # by elapsed time in state, so a skipped slot is covered by the next run.
+    # Hourly check (fallback). monitor.py also emits a summary every ~3h, gated
+    # by elapsed time in state, in case the external trigger below is down.
     - cron: "11 * * * *"
   workflow_dispatch:
     inputs:
       summary:
-        description: "Send a daily summary message this run"
+        description: "Send a summary message this run"
         type: boolean
         default: false
+  # External precise trigger (e.g. cron-job.org) POSTs a repository_dispatch.
+  # event_type "summary" -> run a quick check then send a summary;
+  # event_type "check"   -> run the normal check loop with no summary.
+  repository_dispatch:
+    types: [summary, check]
 
 permissions:
   contents: write
@@ -46,11 +51,12 @@ jobs:
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          # monitor.py auto-sends the heartbeat summary every ~3h. FORCE_SUMMARY
-          # lets a manual dispatch send one on demand for testing.
-          FORCE_SUMMARY: ${{ github.event.inputs.summary == 'true' && '1' || '0' }}
-          # 4 checks, 15 min (900s) apart = full hourly coverage in one run.
-          CHECKS_PER_RUN: "4"
+          # Send one summary this run when triggered as a "summary" (external
+          # repository_dispatch) or via the manual dispatch checkbox.
+          SEND_SUMMARY: ${{ (github.event.action == 'summary' || github.event.inputs.summary == 'true') && '1' || '0' }}
+          # Summary runs do a single quick check (precise timestamp); coverage
+          # runs (schedule / "check") do 4 checks 15 min apart over the hour.
+          CHECKS_PER_RUN: ${{ (github.event.action == 'summary' || github.event.inputs.summary == 'true') && '1' || '4' }}
           CHECK_INTERVAL_SECONDS: "900"
           # Stream logs live during the long run instead of buffering.
           PYTHONUNBUFFERED: "1"
