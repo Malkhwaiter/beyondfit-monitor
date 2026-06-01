@@ -257,26 +257,26 @@ def load_config() -> tuple[list[str], list[str]]:
     return products, watch
 
 
-def main() -> int:
-    token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
-    chat_id = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
-    if not token or not chat_id:
-        print("ERROR: TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID must be set.", file=sys.stderr)
-        return 2
+def _int_env(name: str, default: int) -> int:
+    try:
+        return int(os.environ.get(name, "").strip() or default)
+    except ValueError:
+        return default
 
-    truthy = {"1", "true", "yes"}
-    force_summary = (
-        os.environ.get("FORCE_SUMMARY", "").strip().lower() in truthy
-        or os.environ.get("SEND_SUMMARY", "").strip().lower() in truthy
-    )
+
+def perform_check(token: str, chat_id: str, products: list[str],
+                  watch_sizes: list[str], force_summary: bool) -> int:
+    """Run ONE full check: read every product, notify watched-size
+    sold-out -> in-stock transitions, persist the updated state, and emit the
+    heartbeat summary if due. Returns 0 on success, 1 if anything failed.
+
+    State is saved at the end of every call, so when this is invoked several
+    times within a single run, a size that already triggered an alert won't
+    alert again on the next check inside the same run.
+    """
     now_utc = datetime.now(timezone.utc)
     now_ksa = now_utc + timedelta(hours=KSA_OFFSET_HOURS)
     want_summary = force_summary or summary_due(now_utc, load_last_summary())
-
-    products, watch_sizes = load_config()
-    if not products:
-        print("ERROR: no products configured in products.json.", file=sys.stderr)
-        return 2
     print(f"Watching sizes {watch_sizes} across {len(products)} products. "
           f"KSA now {now_ksa.strftime('%Y-%m-%d %H:%M')}; "
           f"summary {'DUE' if want_summary else 'not due'}.")
@@ -365,9 +365,48 @@ def main() -> int:
         print("Some notifications failed — surfacing as failure.", file=sys.stderr)
         return 1
     if fetch_failures:
-        print(f"{fetch_failures} product(s) could not be read this run.", file=sys.stderr)
+        print(f"{fetch_failures} product(s) could not be read this check.", file=sys.stderr)
 
     return 0
+
+
+def main() -> int:
+    token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
+    chat_id = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
+    if not token or not chat_id:
+        print("ERROR: TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID must be set.", file=sys.stderr)
+        return 2
+
+    truthy = {"1", "true", "yes"}
+    force_summary = (
+        os.environ.get("FORCE_SUMMARY", "").strip().lower() in truthy
+        or os.environ.get("SEND_SUMMARY", "").strip().lower() in truthy
+    )
+
+    products, watch_sizes = load_config()
+    if not products:
+        print("ERROR: no products configured in products.json.", file=sys.stderr)
+        return 2
+
+    # One run performs several checks spaced apart, so a single hourly GitHub
+    # schedule covers the whole hour (e.g. 4 checks 15 min apart) instead of
+    # relying on GitHub's delayed/skipped cron to fire 4 separate runs.
+    checks = max(1, _int_env("CHECKS_PER_RUN", 4))
+    interval = max(0, _int_env("CHECK_INTERVAL_SECONDS", 900))
+    total_min = (checks - 1) * interval // 60
+    print(f"Run plan: {checks} check(s), {interval}s apart (~{total_min} min total).",
+          flush=True)
+
+    worst = 0
+    for i in range(checks):
+        if i > 0:
+            print(f"--- sleeping {interval}s before check {i + 1}/{checks} ---", flush=True)
+            time.sleep(interval)
+        print(f"\n===== CHECK {i + 1}/{checks} =====", flush=True)
+        rc = perform_check(token, chat_id, products, watch_sizes, force_summary)
+        worst = max(worst, rc)
+
+    return worst
 
 
 if __name__ == "__main__":

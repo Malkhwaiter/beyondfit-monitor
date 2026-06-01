@@ -24,7 +24,9 @@ concurrency:
 jobs:
   monitor:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    # One run does 4 checks 15 min apart (~45 min of wall-clock, mostly
+    # sleeping), so the timeout must comfortably exceed that.
+    timeout-minutes: 55
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -44,10 +46,14 @@ jobs:
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          # monitor.py auto-sends the daily summary on the first successful run
-          # after 09:00 KSA. FORCE_SUMMARY just lets a manual dispatch send one
-          # on demand for testing.
+          # monitor.py auto-sends the heartbeat summary every ~3h. FORCE_SUMMARY
+          # lets a manual dispatch send one on demand for testing.
           FORCE_SUMMARY: ${{ github.event.inputs.summary == 'true' && '1' || '0' }}
+          # 4 checks, 15 min (900s) apart = full hourly coverage in one run.
+          CHECKS_PER_RUN: "4"
+          CHECK_INTERVAL_SECONDS: "900"
+          # Stream logs live during the long run instead of buffering.
+          PYTHONUNBUFFERED: "1"
         run: |
           mkdir -p state
           python monitor.py
