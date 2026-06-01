@@ -25,13 +25,22 @@ import os
 import re
 import sys
 import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import requests
 
 CONFIG_FILE = Path("products.json")
 STATE_FILE = Path("state/known_stock.json")
+SUMMARY_STATE_FILE = Path("state/summary_state.json")
 TELEGRAM_API = "https://api.telegram.org/bot{token}/sendMessage"
+
+# Daily heartbeat is due once KSA local time passes this hour. GitHub's free
+# cron is unreliable (runs are often delayed or skipped entirely), so instead
+# of firing at one exact slot we send on the FIRST successful run after this
+# hour each day and remember we sent it — robust against skipped slots.
+KSA_OFFSET_HOURS = 3            # Saudi Arabia is UTC+3, no DST
+SUMMARY_HOUR_KSA = 9           # ~09:00 Riyadh
 
 # Salla calls the size option group "القياس"; allow a few aliases just in case.
 SIZE_GROUP_NAMES = {"القياس", "المقاس", "مقاس", "size", "Size", "الحجم"}
@@ -193,6 +202,28 @@ def send_telegram(token: str, chat_id: str, text: str, *, retries: int = 3) -> N
     raise RuntimeError(f"Telegram send failed after {retries} attempts: {last_err}")
 
 
+def ksa_now() -> datetime:
+    return datetime.now(timezone.utc) + timedelta(hours=KSA_OFFSET_HOURS)
+
+
+def load_summary_date() -> str:
+    if not SUMMARY_STATE_FILE.exists():
+        return ""
+    try:
+        with SUMMARY_STATE_FILE.open("r", encoding="utf-8") as f:
+            return str(json.load(f).get("last_sent_ksa_date", ""))
+    except (json.JSONDecodeError, OSError):
+        return ""
+
+
+def save_summary_date(date_str: str) -> None:
+    SUMMARY_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    tmp = SUMMARY_STATE_FILE.with_suffix(".json.tmp")
+    with tmp.open("w", encoding="utf-8") as f:
+        json.dump({"last_sent_ksa_date": date_str}, f)
+    tmp.replace(SUMMARY_STATE_FILE)
+
+
 def build_summary(current: dict[str, dict], watch_sizes: list[str],
                   fetch_failures: int) -> str:
     """A daily heartbeat: current status of every watched size per product."""
@@ -226,14 +257,23 @@ def main() -> int:
         print("ERROR: TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID must be set.", file=sys.stderr)
         return 2
 
-    want_summary = os.environ.get("SEND_SUMMARY", "").strip().lower() in {"1", "true", "yes"}
+    truthy = {"1", "true", "yes"}
+    force_summary = (
+        os.environ.get("FORCE_SUMMARY", "").strip().lower() in truthy
+        or os.environ.get("SEND_SUMMARY", "").strip().lower() in truthy
+    )
+    now_ksa = ksa_now()
+    today_ksa = now_ksa.strftime("%Y-%m-%d")
+    due_today = now_ksa.hour >= SUMMARY_HOUR_KSA and load_summary_date() != today_ksa
+    want_summary = force_summary or due_today
 
     products, watch_sizes = load_config()
     if not products:
         print("ERROR: no products configured in products.json.", file=sys.stderr)
         return 2
-    print(f"Watching sizes {watch_sizes} across {len(products)} products."
-          f"{' [summary mode]' if want_summary else ''}")
+    print(f"Watching sizes {watch_sizes} across {len(products)} products. "
+          f"KSA now {now_ksa.strftime('%Y-%m-%d %H:%M')}; "
+          f"summary {'DUE' if want_summary else 'not due'}.")
 
     # Collect current availability for every product.
     current: dict[str, dict] = {}
@@ -267,6 +307,7 @@ def main() -> int:
         if want_summary:
             try:
                 send_telegram(token, chat_id, build_summary(current, watch_sizes, fetch_failures))
+                save_summary_date(today_ksa)
                 print("Daily summary sent.")
             except Exception as e:  # noqa: BLE001
                 print(f"  failed to send summary: {e}", file=sys.stderr)
@@ -309,6 +350,7 @@ def main() -> int:
     if want_summary:
         try:
             send_telegram(token, chat_id, build_summary(current, watch_sizes, fetch_failures))
+            save_summary_date(today_ksa)
             print("Daily summary sent.")
         except Exception as e:  # noqa: BLE001
             print(f"  failed to send summary: {e}", file=sys.stderr)

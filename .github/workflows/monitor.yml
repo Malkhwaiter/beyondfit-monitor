@@ -43,9 +43,10 @@ jobs:
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          # Send the heartbeat summary on the daily cron, or when manually
-          # dispatched with the summary input checked.
-          SEND_SUMMARY: ${{ (github.event.schedule == '0 6 * * *' || github.event.inputs.summary == 'true') && '1' || '0' }}
+          # monitor.py auto-sends the daily summary on the first successful run
+          # after 09:00 KSA. FORCE_SUMMARY just lets a manual dispatch send one
+          # on demand for testing.
+          FORCE_SUMMARY: ${{ github.event.inputs.summary == 'true' && '1' || '0' }}
         run: |
           mkdir -p state
           python monitor.py
