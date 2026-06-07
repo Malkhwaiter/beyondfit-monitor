@@ -15,10 +15,10 @@
     "key": "p51278165",
     "sizes": {
       "2XL": true,
-      "L": false,
-      "M": false,
-      "S": false,
-      "XL": false
+      "L": true,
+      "M": true,
+      "S": true,
+      "XL": true
     },
     "title": "تيشيرت قطني هيذر رمادي",
     "url": "https://beyondfit-sa.com/تيشيرت-قطني-هيذر-رمادي/p51278165"
@@ -27,10 +27,10 @@
     "key": "p539475871",
     "sizes": {
       "2XL": true,
-      "L": false,
-      "M": false,
-      "S": false,
-      "XL": false
+      "L": true,
+      "M": true,
+      "S": true,
+      "XL": true
     },
     "title": "تيشيرت قطني أسود",
     "url": "https://beyondfit-sa.com/تيشيرت-قطني-أسود/p539475871"
@@ -38,11 +38,11 @@
   "p745487699": {
     "key": "p745487699",
     "sizes": {
-      "2XL": false,
-      "L": false,
-      "M": false,
-      "S": false,
-      "XL": false
+      "2XL": true,
+      "L": true,
+      "M": true,
+      "S": true,
+      "XL": true
     },
     "title": "تيشيرت قطني أبيض",
     "url": "https://beyondfit-sa.com/تيشيرت-قطني-أبيض/p745487699"
